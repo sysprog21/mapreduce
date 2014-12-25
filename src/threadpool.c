@@ -34,8 +34,10 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <semaphore.h>
 
 #include "threadpool.h"
+#define THREADS_MAX 255
 
 typedef enum {
     immediate_shutdown = 1,
@@ -101,6 +103,10 @@ threadpool_t *threadpool_create(int thread_count, int queue_size, int flags)
 
     if(thread_count <= 0 || thread_count > MAX_THREADS || queue_size <= 0 || queue_size > MAX_QUEUE) {
         return NULL;
+    }
+
+    if(thread_count <= 0 || thread_count > THREADS_MAX) {
+        goto err;
     }
 
     if((pool = (threadpool_t *)malloc(sizeof(threadpool_t))) == NULL) {
@@ -262,6 +268,129 @@ int threadpool_free(threadpool_t *pool)
     return 0;
 }
 
+typedef struct {
+    int personal_pointers[THREADS_MAX];
+    void(*routine)(int n, void *);
+    void *arg;
+    int size;
+    int thread_count;
+    sem_t done_indicator;
+} threadpool_map_t;
+
+static void threadpool_map_thread(void *arg);
+
+int threadpool_map(threadpool_t *pool, int size, void(*routine)(int n, void *),
+	void *arg, int flags)
+{
+    threadpool_error_t err = 0;
+    threadpool_map_t map = {
+        .routine = routine,
+        .arg = arg,
+        .thread_count = pool->thread_count,
+        .size = size,
+    };
+
+    sem_init(&map.done_indicator, 0, 0);
+	
+    for (int i = 0; i < pool->thread_count; i++)
+        map.personal_pointers[i] = i;
+
+    for (int i = 0; i < pool->thread_count; i++) {
+        threadpool_error_t _err = threadpool_add(pool, threadpool_map_thread,
+                                                 &map.personal_pointers[i],
+                                                 flags);
+        /* FIXME: check errors correctly */
+        if (_err) {
+            err = _err;
+            sem_post(&map.done_indicator);
+        }
+    }
+
+    for (int i = 0; i < pool->thread_count; i++)
+        sem_wait(&map.done_indicator);
+
+    sem_destroy(&map.done_indicator);
+    return err;
+}
+
+typedef struct {
+    threadpool_reduce_t *userdata;
+    int size;
+    int thread_count;
+    void *elements[THREADS_MAX];
+} reduce_t_internal;
+
+static void threadpool_reduce_thread(int n, void *arg);
+
+int threadpool_reduce(threadpool_t *pool, threadpool_reduce_t *reduce)
+{
+    reduce_t_internal info = {
+        .size = ((char *) reduce->end -
+                 (char *) reduce->begin) / reduce->object_size,
+        .thread_count = pool->thread_count,
+        .userdata = reduce,
+    };
+
+    int err = threadpool_map(pool, pool->thread_count, threadpool_reduce_thread, &info, 0);
+    if (err) return err;
+
+    for (int i = 1; i < pool->thread_count; i++) {
+        info.userdata->reduce(info.userdata->self,
+                              info.elements[0], info.elements[i]);
+        info.userdata->reduce_free(info.userdata->self, info.elements[i]);
+    }
+    info.userdata->reduce_finish(info.userdata->self, info.elements[0]);
+    info.userdata->reduce_free(info.userdata->self, info.elements[0]);
+    return 0;
+}
+
+static void threadpool_reduce_thread(int n, void *arg)
+{
+    reduce_t_internal *info = (reduce_t_internal *) arg;
+    int end = info->size / info->thread_count;
+    int additional_items = info->size - end * info->thread_count;
+    int start = end * n;
+
+    if (n <= additional_items)	{
+        start += n;
+        if (n < additional_items) end++;
+    }
+    else {
+        start += additional_items;
+    }
+    end += start;
+
+    info->elements[n] = info->userdata->reduce_alloc_neutral(info->userdata);
+
+    for (; start < end; start++) {
+        info->userdata->reduce(info->userdata->self, info->elements[n], 
+                               (char *) info->userdata->begin +
+                               start * info->userdata->object_size);
+	}
+}
+
+static void threadpool_map_thread(void *arg)
+{
+    int id = *(int *) arg;
+    threadpool_map_t *map = (threadpool_map_t *) ((int *) arg - id);
+    int end = map->size / map->thread_count;
+    int additional_items = map->size - end * map->thread_count;
+    int start = end * id;
+	
+    if (id <= additional_items)	{
+        start += id;
+        if (id < additional_items) end++;
+    }
+    else {
+        start += additional_items;
+    }
+    end += start;
+
+    for (; start < end; start++)
+        map->routine(start, map->arg);
+
+    sem_post(&map->done_indicator);	
+}
 
 static void *threadpool_thread(void *threadpool)
 {
