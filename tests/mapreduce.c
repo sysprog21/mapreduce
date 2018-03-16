@@ -70,5 +70,7 @@ int main(int argc, char *argv[])
 
     threadpool_reduce(pool, &reduce);
 
+    threadpool_destroy(pool, 0);
+    free(data);
     return 0;
 }
