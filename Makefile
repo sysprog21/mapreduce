@@ -46,7 +46,7 @@ test: check
 check: $(TESTS)
 	@for test in $^ ; \
 	do \
-		echo "Execute $$test..." ; $$test && echo "OK!\n" ; \
+		echo "Execute $$test..." ; $$test && printf "OK!\n" ; \
 	done
 
 -include $(deps)
