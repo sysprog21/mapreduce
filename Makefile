@@ -1,4 +1,4 @@
-CFLAGS := -D_REENTRANT -Wall -pedantic -Isrc
+CFLAGS := -D_REENTRANT -Wall -pedantic -Isrc -std=c99
 CFLAGS += -fPIC
 LDFLAGS = -lpthread
 
